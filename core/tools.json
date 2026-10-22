@@ -130,7 +130,7 @@
       "label": "SAP Login",
       "op": "login",
       "readOnly": false,
-      "description": "Log on to a configured SAP system (see sap_systems): opens the connection, fills client, user, password and language, and handles the multiple-logon and system-message popups. The password comes from the profile's secret reference and is never shown. Without a password the profile uses single sign-on. To work in a session the user already opened, use sap_sessions instead.",
+      "description": "Log on to a configured SAP system (see sap_systems): opens the connection, fills client, user, password and language, and handles the multiple-logon and system-message popups. The password comes from the profile's secret reference and is never shown. Without a stored password the logon screen is only prepared (client, user, language); the person types the password in SAP GUI, then call sap_sessions. A profile without a password on a single-sign-on system logs on directly.",
       "parameters": {
         "system": {
           "type": "string",

@@ -460,6 +460,15 @@ var SapBridge = (function () {
   }
   function shellSubType(el) { return propStr(el, "subType"); }
 
+  /** SAP GUI for Java exposes ALV grids as a GuiShell without a subType, but with the grid methods. */
+  function shellActsAsGrid(el) {
+    if (shellSubType(el)) { return false; }
+    if (isNil(prop(el, "rowCount"))) { return false; }
+    var fn;
+    try { fn = el.getCellValue; } catch (e) { return false; }
+    return typeof fn === "function";
+  }
+
   /** Element id relative to the session: "wnd[0]/usr/ctxtX". */
   function relId(el) {
     var id = propStr(el, "id");
@@ -607,7 +616,7 @@ var SapBridge = (function () {
       t === "GuiHTMLViewer" || t === "GuiAbapEditor" || t === "GuiPicture" || t === "GuiCalendar") {
       var sub = shellSubType(el);
       d.subType = sub;
-      if (sub === "GridView" || t === "GuiGridView") {
+      if (sub === "GridView" || t === "GuiGridView" || shellActsAsGrid(el)) {
         d.kind = "grid";
         d.rowCount = num(prop(el, "rowCount"), 0);
         d.columnCount = num(prop(el, "columnCount"), 0);
@@ -1392,6 +1401,7 @@ var SapBridge = (function () {
     var sub = shellSubType(el);
     if (t === "GuiTableControl") { return "table"; }
     if (t === "GuiGridView" || sub === "GridView") { return "grid"; }
+    if (t === "GuiShell" && shellActsAsGrid(el)) { return "grid"; }
     if (t === "GuiTree" || sub === "Tree") { return "tree"; }
     if (t === "GuiTextedit" || sub === "TextEdit") { return "textedit"; }
     if (t === "GuiAbapEditor" || sub === "AbapEditor") { return "editor"; }
@@ -1856,6 +1866,20 @@ var SapBridge = (function () {
       if (args.user) { s.findById("wnd[0]/usr/txtRSYST-BNAME").text = str(args.user); }
       if (!isNil(args.password)) { s.findById("wnd[0]/usr/pwdRSYST-BCODE").text = str(args.password); }
       if (args.language && exists(s, "wnd[0]/usr/txtRSYST-LANGU")) { s.findById("wnd[0]/usr/txtRSYST-LANGU").text = str(args.language); }
+      if (isNil(args.password) && !bool(args.submitWithoutPassword)) {
+        /* No stored secret: leave the password field alone and hand the screen to the person.
+           Submitting an empty password would only produce an SAP error and burn a logon attempt. */
+        var filled = [];
+        if (args.client) { filled.push("client " + str(args.client)); }
+        if (args.user) { filled.push("user " + str(args.user)); }
+        if (args.language) { filled.push("language " + str(args.language)); }
+        var prepInfo = sessionInfo(s);
+        return {
+          text: "Logon screen prepared" + (filled.length ? " (" + filled.join(", ") + ")" : "") +
+            ". SAP GUI is waiting for the password: type it in the window and press Enter, then call sap_sessions.",
+          data: { session: prepInfo.id, info: prepInfo, prepared: true, state: afterState(s) }
+        };
+      }
       s.findById("wnd[0]").sendVKey(0);
       waitIdle(s, 60000);
       steps.push("submitted the logon screen");
