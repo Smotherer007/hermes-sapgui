@@ -524,7 +524,7 @@ var SapBridge = (function () {
   var CONTAINER_TYPES = ["GuiMainWindow", "GuiModalWindow", "GuiFrameWindow", "GuiUserArea",
     "GuiSimpleContainer", "GuiScrollContainer", "GuiTabStrip", "GuiTab", "GuiCustomControl",
     "GuiContainerShell", "GuiSplitterContainer", "GuiDockShell", "GuiGOSShell", "GuiToolbar",
-    "GuiShell"];
+    "GuiShell", "GuiListContainer", "GuiSubscreenContainer", "GuiSubscreen"];
 
   function readStatus(s, wndIndex) {
     var w = isNil(wndIndex) ? 0 : wndIndex;
@@ -725,6 +725,9 @@ var SapBridge = (function () {
         if (d.kind === "text" && !trim(d.value)) { continue; }
         if (d.kind !== "chrome" && d.kind !== "container") { out.elements.push(d); }
         var recurse = indexOf(CONTAINER_TYPES, t) >= 0 || t === "";
+        /* SAP GUI for Java uses container types we do not list (GuiListContainer,
+           GuiSplitterShell, ...); descend into anything unknown that has children. */
+        if (!recurse && d.kind === "other") { recurse = collCount(children(el)) > 0; }
         if (d.kind === "table" || d.kind === "grid" || d.kind === "tree" || d.kind === "textedit" || d.kind === "toolbar") { recurse = false; }
         if (recurse) { walk(el, depth + 1); }
       }
@@ -1012,8 +1015,11 @@ var SapBridge = (function () {
     var r = tryCall(s, "findById", ["wnd[" + w + "]"]);
     if (!r.ok || isNil(r.value)) { fail("NOT_FOUND", "Window wnd[" + w + "] does not exist.", "The active window is wnd[" + top + "]."); }
     var wnd = r.value;
-    var res = collect(wnd, { maxElements: args.maxElements || 400, includeToolbar: bool(args.includeToolbar), icon: false });
     var filter = lower(trim(args.filter));
+    var wanted = num(args.maxElements, 400);
+    /* The filter is applied to the rendered lines after collecting, so the scan must not stop
+       early: otherwise a small maxElements hides elements that would match the filter. */
+    var res = collect(wnd, { maxElements: filter ? Math.max(wanted, 800) : wanted, includeToolbar: bool(args.includeToolbar), icon: false });
     var st = afterState(s);
     var lines = [renderAfter(st)];
     if (w !== top) { lines.push("(showing wnd[" + w + "], the active window is wnd[" + top + "])"); }
@@ -1023,6 +1029,7 @@ var SapBridge = (function () {
     for (var i = 0; i < res.elements.length; i++) {
       var line = renderElement(res.elements[i]);
       if (filter && lower(line).indexOf(filter) < 0) { continue; }
+      if (shown >= wanted) { res.truncated = true; break; }
       lines.push(line);
       shown++;
     }
@@ -1184,7 +1191,11 @@ var SapBridge = (function () {
 
   OPS.key = function (args) {
     var s = findSession(args.session);
-    waitIdle(s, 30000);
+    /* noWait: keys that open a modal dialog (ABAP Debugger, "save changes?") make SAP GUI
+       block until the dialog is answered, so the caller opts out of waiting and idle
+       detection altogether and reads the screen afterwards. */
+    var noWait = bool(args.noWait);
+    if (!noWait) { waitIdle(s, 30000); }
     var vk = vkeyOf(isNil(args.key) ? "enter" : args.key);
     var w = isNil(args.window) || args.window === "" ? activeWindowIndex(s) : num(args.window, 0);
     var wnd = s.findById("wnd[" + w + "]");
@@ -1194,6 +1205,10 @@ var SapBridge = (function () {
     }
     if (!isNil(args.focus) && args.focus !== "") { findElement(s, args.focus, w).setFocus(); }
     wnd.sendVKey(vk);
+    if (noWait) {
+      return { text: "sent " + str(args.key || "Enter") + " (VKey " + vk + ") to wnd[" + w + "] without waiting; read the next screen with sap_screen\n",
+        data: { vkey: vk, noWait: true } };
+    }
     var st = afterState(s);
     return { text: "sent " + str(args.key || "Enter") + " (VKey " + vk + ") to wnd[" + w + "]\n" + renderAfter(st), data: { vkey: vk, state: st } };
   };

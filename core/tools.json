@@ -226,7 +226,7 @@
         },
         "maxElements": {
           "type": "number",
-          "description": "Stop after this many elements. Default 400."
+          "description": "Stop after this many shown elements (with filter: this many matches). Default 400."
         },
         "session": {
           "$ref": "session"
@@ -332,6 +332,10 @@
         "focus": {
           "type": "string",
           "description": "Element id to focus before sending the key (e.g. a field for F4)."
+        },
+        "noWait": {
+          "type": "boolean",
+          "description": "Do not wait for SAP to become idle afterwards. Use for keys that open a modal dialog (ABAP Debugger, 'save changes?'), then read the screen with sap_screen. Default false."
         },
         "session": {
           "$ref": "session"
