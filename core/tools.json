@@ -1,0 +1,558 @@
+{
+  "$comment": "Single source of truth for the tool surface. hermes-sapgui and pi-sapgui register exactly these tools from this file. 'op' is the bridge operation; 'adapter' marks tools the plugin answers itself. 'readOnly' tools never go through the safety gate; all others are classified by the bridge op 'guard'.",
+  "version": 1,
+  "common": {
+    "session": {
+      "type": "string",
+      "description": "Session to act on, e.g. /app/con[0]/ses[0] (from sap_sessions). Defaults to the bound session, else the active one."
+    }
+  },
+  "tools": [
+    {
+      "name": "sap_status",
+      "label": "SAP Status",
+      "adapter": true,
+      "readOnly": true,
+      "description": "Show whether SAP GUI is reachable, which backend is used (Windows COM or SAP GUI for Java), the open connections and sessions, the bound session and the safety level. Call this first in a new conversation.",
+      "parameters": {}
+    },
+    {
+      "name": "sap_doctor",
+      "label": "SAP Doctor",
+      "adapter": true,
+      "readOnly": true,
+      "description": "Diagnose the SAP GUI integration step by step (launcher found, bridge starts, scripting enabled on client and server, round trip) and say how to fix what fails. Use it when another sap_* tool reports SAPGUI_UNAVAILABLE, SCRIPTING_DISABLED or a timeout.",
+      "parameters": {}
+    },
+    {
+      "name": "sap_start",
+      "label": "SAP Start",
+      "adapter": true,
+      "readOnly": false,
+      "description": "Start SAP GUI so the agent can drive it. Windows: starts SAP Logon if it is not running. SAP GUI for Java (macOS/Linux): starts SAP GUI for Java with the bridge script; the user can then log on in the window that opens, or call sap_login. Does nothing if the bridge is already reachable.",
+      "parameters": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "windows",
+            "java"
+          ],
+          "description": "Override the configured backend for this start. Default: the configured one (auto = Windows COM on Windows, Java elsewhere)."
+        },
+        "waitSeconds": {
+          "type": "number",
+          "description": "How long to wait for SAP GUI to come up. Default 60."
+        }
+      }
+    },
+    {
+      "name": "sap_systems",
+      "label": "SAP Systems",
+      "adapter": true,
+      "readOnly": true,
+      "description": "List the configured SAP system profiles (name, SID, client, user, how the password is resolved, safety level). Never shows passwords.",
+      "parameters": {}
+    },
+    {
+      "name": "sap_setup_system",
+      "label": "SAP Setup System",
+      "adapter": true,
+      "readOnly": false,
+      "description": "Add, update or remove a SAP system profile for sap_login. The password is never stored in clear text: pass a reference such as ${env:SAP_DEV_PASSWORD}, ${keychain:sapgui/DEV} (macOS), ${secret-tool:service=sapgui system=DEV} (Linux), ${wincred:sapgui/DEV} (Windows) or ${cmd:op read op://vault/sap/password}. Leave password out for single sign-on (SNC).",
+      "parameters": {
+        "name": {
+          "type": "string",
+          "description": "Profile name, e.g. DEV or S4-QA."
+        },
+        "remove": {
+          "type": "boolean",
+          "description": "Delete the profile instead of saving it."
+        },
+        "description": {
+          "type": "string",
+          "description": "One line on what the system is."
+        },
+        "sid": {
+          "type": "string",
+          "description": "System ID (e.g. DEV). Used to apply the profile's safety level to any session on that system."
+        },
+        "connection": {
+          "type": "string",
+          "description": "SAP Logon entry name exactly as shown in SAP Logon (Windows; also works in SAP GUI for Java for entries of its logon pad)."
+        },
+        "connectionString": {
+          "type": "string",
+          "description": "Connection string, e.g. /H/saprouter/S/3299/H/host/S/3200 or conn=/H/host/S/3200 (SAP GUI for Java)."
+        },
+        "client": {
+          "type": "string",
+          "description": "Client (Mandant), e.g. 100."
+        },
+        "user": {
+          "type": "string",
+          "description": "SAP user name."
+        },
+        "language": {
+          "type": "string",
+          "description": "Logon language, e.g. DE or EN."
+        },
+        "password": {
+          "type": "string",
+          "description": "Secret REFERENCE only (${env:...}, ${keychain:...}, ${secret-tool:...}, ${wincred:...}, ${cmd:...}). A clear-text password is refused."
+        },
+        "safety": {
+          "type": "string",
+          "enum": [
+            "open",
+            "confirm",
+            "confirm-all",
+            "readonly"
+          ],
+          "description": "Safety level for this system; the stricter of this and the global level applies. Use readonly for production."
+        },
+        "multiLogon": {
+          "type": "string",
+          "enum": [
+            "continue",
+            "terminateOthers",
+            "cancel"
+          ],
+          "description": "What to do when the user is already logged on elsewhere. Default continue."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    {
+      "name": "sap_login",
+      "label": "SAP Login",
+      "op": "login",
+      "readOnly": false,
+      "description": "Log on to a configured SAP system (see sap_systems): opens the connection, fills client, user, password and language, and handles the multiple-logon and system-message popups. The password comes from the profile's secret reference and is never shown. Without a password the profile uses single sign-on. To work in a session the user already opened, use sap_sessions instead.",
+      "parameters": {
+        "system": {
+          "type": "string",
+          "description": "Profile name from sap_systems."
+        },
+        "client": {
+          "type": "string",
+          "description": "Override the profile's client."
+        },
+        "language": {
+          "type": "string",
+          "description": "Override the profile's language."
+        },
+        "multiLogon": {
+          "type": "string",
+          "enum": [
+            "continue",
+            "terminateOthers",
+            "cancel"
+          ],
+          "description": "Override the profile's multiple-logon handling."
+        }
+      },
+      "required": [
+        "system"
+      ]
+    },
+    {
+      "name": "sap_sessions",
+      "label": "SAP Sessions",
+      "op": "sessions",
+      "readOnly": false,
+      "description": "List open SAP connections and sessions (system, client, user, transaction), bind the agent to one session (all later calls use it), open a new session, close a session, or log off a connection.",
+      "parameters": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "bind",
+            "create",
+            "close",
+            "logoff"
+          ],
+          "description": "Default list. bind makes 'session' the default for every later call."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_transaction",
+      "label": "SAP Transaction",
+      "op": "transaction",
+      "readOnly": false,
+      "description": "Start a transaction (enters /n<tcode> in the command field and presses Enter) and return the new screen header with status bar and any popup. Read the screen afterwards with sap_screen. 'command' sends a raw OK-code instead (e.g. =SAVE, /nend); raw OK-codes other than /n and /o go through the safety gate.",
+      "parameters": {
+        "tcode": {
+          "type": "string",
+          "description": "Transaction code, e.g. MM03, SE16N, /SCWM/MON."
+        },
+        "newSession": {
+          "type": "boolean",
+          "description": "Open the transaction in a new session (/o) instead of the current one (/n)."
+        },
+        "command": {
+          "type": "string",
+          "description": "Raw OK-code instead of tcode."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_screen",
+      "label": "SAP Screen",
+      "op": "screen",
+      "readOnly": true,
+      "description": "Read the current screen: system, transaction, program and dynpro, title, status bar, open popups, and every element with its id, label, value and state (inputs, outputs, checkboxes, radio buttons, combo boxes, buttons, tabs, tables, ALV grids, trees, list output). Use the ids it returns for sap_set, sap_press and sap_table. Shows the popup if one is open.",
+      "parameters": {
+        "window": {
+          "type": "number",
+          "description": "Window index (0 = main window, 1+ = popups). Default: the active window."
+        },
+        "filter": {
+          "type": "string",
+          "description": "Only show elements whose line contains this text (case-insensitive)."
+        },
+        "includeToolbar": {
+          "type": "boolean",
+          "description": "Also list the standard toolbar (tbar[0]: Save, Back, Exit, ...). Default false."
+        },
+        "maxElements": {
+          "type": "number",
+          "description": "Stop after this many elements. Default 400."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_set",
+      "label": "SAP Set Fields",
+      "op": "set",
+      "readOnly": false,
+      "description": "Fill screen fields in one call: text fields, checkboxes (true/false), radio buttons (true selects), combo boxes (key or displayed text) and tabs (any value selects). Address each field by id from sap_screen (preferred) or by its label. Returns what SAP shows afterwards, so a converted or truncated value is visible. Does not press Enter unless enter is true. Table-control cells are fields too (their id from sap_screen/sap_table).",
+      "parameters": {
+        "fields": {
+          "type": "array",
+          "description": "Fields to set, in order.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Element id, e.g. wnd[0]/usr/ctxtRMMG1-MATNR."
+              },
+              "label": {
+                "type": "string",
+                "description": "Label text instead of id (must be unique)."
+              },
+              "value": {
+                "type": "string",
+                "description": "New value. Checkboxes: true/false; radio buttons: true; combo boxes: key or displayed text."
+              }
+            },
+            "required": [
+              "value"
+            ]
+          }
+        },
+        "enter": {
+          "type": "boolean",
+          "description": "Press Enter after setting all fields. Default false."
+        },
+        "window": {
+          "type": "number",
+          "description": "Window the ids/labels refer to when they omit wnd[n]. Default: active window for labels, wnd[0] for ids."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      },
+      "required": [
+        "fields"
+      ]
+    },
+    {
+      "name": "sap_press",
+      "label": "SAP Press",
+      "op": "press",
+      "readOnly": false,
+      "description": "Press a button, select a tab or radio button, toggle a checkbox, or double-click a list line / hotspot field (action doubleClick, also used to drill into classic reports). action f4 opens the value help of a field. Address the element by id from sap_screen or by its label/tooltip. Buttons that save, post, release or delete go through the safety gate.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "Element id from sap_screen."
+        },
+        "label": {
+          "type": "string",
+          "description": "Button text or tooltip instead of id."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "doubleClick",
+            "focus",
+            "f4"
+          ],
+          "description": "Default auto (press/select/toggle by element type)."
+        },
+        "window": {
+          "type": "number",
+          "description": "Window index when the id omits wnd[n]."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_key",
+      "label": "SAP Key",
+      "op": "key",
+      "readOnly": false,
+      "description": "Send a function key to a window: Enter, F1-F12 (F3 Back, F8 Execute, F12 Cancel), Shift+F1..F12, Ctrl+F1..F12, Ctrl+S (save, gated), PageUp/PageDown, or a VKey number. Refuses keys that are not active on the screen.",
+      "parameters": {
+        "key": {
+          "type": "string",
+          "description": "Key name or VKey number. Default Enter."
+        },
+        "window": {
+          "type": "number",
+          "description": "Window index. Default: the active window."
+        },
+        "focus": {
+          "type": "string",
+          "description": "Element id to focus before sending the key (e.g. a field for F4)."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_menu",
+      "label": "SAP Menu",
+      "op": "menu",
+      "readOnly": false,
+      "description": "Select an entry of the menu bar by its path of texts, e.g. [\"Edit\", \"Select All\"] or \"Bearbeiten > Alles markieren\". Without path it lists the menu. Entries that save, post or delete go through the safety gate.",
+      "parameters": {
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Menu texts from the menu bar down, e.g. [\"Edit\", \"Select All\"]. A single string \"Edit > Select All\" also works."
+        },
+        "depth": {
+          "type": "number",
+          "description": "When listing: how many levels. Default 1."
+        },
+        "window": {
+          "type": "number",
+          "description": "Window index. Default 0."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_popup",
+      "label": "SAP Popup",
+      "op": "popup",
+      "readOnly": false,
+      "description": "Read or answer the popup that is open: read shows title, text and buttons; confirm presses Yes/OK/Continue; cancel presses Cancel/No or F12; press presses a button by text, tooltip or id. Answers that may save or discard data go through the safety gate.",
+      "parameters": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "read",
+            "confirm",
+            "cancel",
+            "press"
+          ],
+          "description": "Default read."
+        },
+        "button": {
+          "type": "string",
+          "description": "For press: button text, tooltip or id."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_table",
+      "label": "SAP Table",
+      "op": "table",
+      "readOnly": true,
+      "description": "Read data from an ALV grid, a table control, a tree, a text editor, or classic list output (kind list). Without id it reads the first table/grid/tree on the screen. Grids are read in pages (startRow/maxRows) and scrolled so every row renders; the answer says where the next page starts. Also lists the grid's toolbar buttons for sap_table_action.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "Element id of the grid/table/tree from sap_screen."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "list"
+          ],
+          "description": "list reads classic report output (WRITE lists) as text lines."
+        },
+        "startRow": {
+          "type": "number",
+          "description": "First row (0-based). Table controls: default is the current scroll position."
+        },
+        "maxRows": {
+          "type": "number",
+          "description": "Maximum rows (or tree nodes). Default 100, max 1000."
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Only these columns (technical names or titles), e.g. [\"MATNR\", \"MAKTX\"]."
+        },
+        "scroll": {
+          "type": "boolean",
+          "description": "Table controls: keep scrolling past the visible rows until maxRows. Default false."
+        },
+        "pages": {
+          "type": "number",
+          "description": "kind list: read this many pages, pressing Page Down in between. Default 1."
+        },
+        "window": {
+          "type": "number",
+          "description": "Window index. Default: the active window."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_table_action",
+      "label": "SAP Table Action",
+      "op": "table_action",
+      "readOnly": false,
+      "description": "Act on an ALV grid, table control or tree. Grid: selectRows (rows like \"0,2-4\"), selectAll, clearSelection, click / doubleClick a cell (hotspot, drill-down), currentCell, setCell (editable grid), pressToolbar (button id from sap_table), contextMenu then selectMenuItem (item = function code), selectColumn, pressHeader. Table control: selectRow, deselectRow, scroll, doubleClick, currentCell, setCell. Tree: expand, collapse, select, doubleClick, click, pressButton, check, contextMenu, selectMenuItem (node = key from sap_table).",
+      "parameters": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "selectRows",
+            "selectRow",
+            "deselectRow",
+            "selectAll",
+            "clearSelection",
+            "click",
+            "doubleClick",
+            "currentCell",
+            "setCell",
+            "pressToolbar",
+            "contextMenu",
+            "selectMenuItem",
+            "selectColumn",
+            "pressHeader",
+            "scroll",
+            "expand",
+            "collapse",
+            "select",
+            "pressButton",
+            "check"
+          ],
+          "description": "What to do."
+        },
+        "id": {
+          "type": "string",
+          "description": "Element id of the grid/table/tree. Default: the first one on the screen."
+        },
+        "row": {
+          "type": "number",
+          "description": "Row index (0-based, absolute)."
+        },
+        "rows": {
+          "type": "string",
+          "description": "selectRows: rows like \"0,2-4\"."
+        },
+        "column": {
+          "type": "string",
+          "description": "Column technical name (or title for table controls); tree item/column name."
+        },
+        "value": {
+          "type": "string",
+          "description": "setCell: new value; check: checked state."
+        },
+        "button": {
+          "type": "string",
+          "description": "pressToolbar: toolbar button id."
+        },
+        "item": {
+          "type": "string",
+          "description": "selectMenuItem: function code (or text) of the menu item."
+        },
+        "node": {
+          "type": "string",
+          "description": "Tree node key from sap_table."
+        },
+        "window": {
+          "type": "number",
+          "description": "Window index. Default: the active window."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    },
+    {
+      "name": "sap_screenshot",
+      "label": "SAP Screenshot",
+      "op": "screenshot",
+      "readOnly": true,
+      "description": "Take a screenshot of the SAP window (or a popup) and return it as an image, for visual checks or documentation. Prefer sap_screen to read values.",
+      "parameters": {
+        "window": {
+          "type": "number",
+          "description": "Window index. Default: the active window."
+        },
+        "session": {
+          "$ref": "session"
+        }
+      }
+    },
+    {
+      "name": "sap_script",
+      "label": "SAP Script",
+      "op": "script",
+      "readOnly": false,
+      "description": "Run a JavaScript snippet against the SAP GUI scripting API when no other tool fits (always goes through the safety gate). Variables: session (GuiSession), application (GuiApplication), sap.findById(id), sap.waitIdle(), sap.log(text). The value of the last expression is returned. The snippet must be plain ES3 JavaScript (it also runs in Windows Script Host).",
+      "parameters": {
+        "code": {
+          "type": "string",
+          "description": "JavaScript, e.g. session.findById(\"wnd[0]/usr/txtX\").text"
+        },
+        "session": {
+          "$ref": "session"
+        }
+      },
+      "required": [
+        "code"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      RHINO_JAR: ${{ github.workspace }}/.ci/rhino.jar
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # node runs the Windows Script Host imitation, java + Rhino stand in for SAP GUI for Java
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Download Rhino
+        run: mkdir -p .ci && curl -sSfL -o .ci/rhino.jar https://github.com/mozilla/rhino/releases/download/Rhino1_7_15_Release/rhino-1.7.15.jar
+
+      - name: Install test dependencies
+        run: |
+          pip install "pytest>=8,<10" "pyyaml>=6,<7"
+          npm i --no-save --no-package-lock acorn@8
+
+      - name: Shared bridge (core/)
+        run: node --test core/test/*.test.mjs
+
+      - name: Plugin
+        run: python -m pytest tests
+

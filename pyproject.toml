@@ -1,0 +1,14 @@
+[project]
+name = "hermes-sapgui"
+version = "0.1.0"
+description = "SAP GUI plugin for Hermes Agent: drive SAP GUI for Windows and SAP GUI for Java with approval for anything that saves."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Patrick Weppelmann" }]
+requires-python = ">=3.11"
+# Standard library only. Hermes installs [project].dependencies into its own
+# virtualenv on `hermes plugins install`, so this list stays empty on purpose.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pyyaml>=6,<7"]

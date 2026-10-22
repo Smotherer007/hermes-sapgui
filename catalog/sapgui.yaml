@@ -1,0 +1,41 @@
+# Candidate entry for the Hermes plugin catalog.
+# Target: NousResearch/hermes-agent -> plugin-catalog/sapgui.yaml
+#
+# `sha` must be an exact 40-character commit pin. Set it to the commit that
+# froze the release before opening the catalog PR.
+name: sapgui
+repo: https://github.com/Smotherer007/hermes-sapgui
+sha: 0000000000000000000000000000000000000000
+description: Drive SAP GUI for Windows and SAP GUI for Java (macOS, Linux) -- transactions, screens,
+  ALV grids, popups, logon -- with approval for anything that saves. Standard library only; acts with
+  the SAP user's own authorizations.
+maintainer: Patrick Weppelmann
+tier: community
+category: tools
+version: "0.1.0"
+docs_url: https://github.com/Smotherer007/hermes-sapgui#readme
+platforms: []
+capabilities:
+  provides_tools:
+  - sap_status
+  - sap_doctor
+  - sap_start
+  - sap_systems
+  - sap_setup_system
+  - sap_login
+  - sap_sessions
+  - sap_transaction
+  - sap_screen
+  - sap_set
+  - sap_press
+  - sap_key
+  - sap_menu
+  - sap_popup
+  - sap_table
+  - sap_table_action
+  - sap_screenshot
+  - sap_script
+  provides_hooks:
+  - pre_tool_call
+  provides_middleware: []
+  requires_env: []

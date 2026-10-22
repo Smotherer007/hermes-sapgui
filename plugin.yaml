@@ -1,0 +1,82 @@
+name: sapgui
+version: 0.1.0
+description: "SAP GUI for Hermes: read screens, fill fields, run transactions and read ALV grids in SAP GUI for Windows and SAP GUI for Java (macOS, Linux), with approval for anything that saves."
+author: Patrick Weppelmann
+kind: standalone
+manifest_version: 2
+api_version: 1
+license: MIT
+homepage: https://github.com/Smotherer007/hermes-sapgui
+tags: [sap, sapgui, erp, automation, rpa]
+provides_tools:
+  - sap_status
+  - sap_doctor
+  - sap_start
+  - sap_systems
+  - sap_setup_system
+  - sap_login
+  - sap_sessions
+  - sap_transaction
+  - sap_screen
+  - sap_set
+  - sap_press
+  - sap_key
+  - sap_menu
+  - sap_popup
+  - sap_table
+  - sap_table_action
+  - sap_screenshot
+  - sap_script
+provides_hooks:
+  - pre_tool_call
+# No requires_env: systems are configured with sap_setup_system or in
+# ~/.sapgui-bridge/config.json; passwords only as secret references.
+optional_env:
+  - name: SAPGUI_CONFIG
+    description: "Path to the shared system profile file (default: ~/.sapgui-bridge/config.json)"
+  - name: SAPGUI_BRIDGE_HOME
+    description: "Directory for bridge state, logs and screenshots (default: ~/.sapgui-bridge)"
+config_schema:
+  safety_level:
+    type: str
+    choices: [open, confirm, confirm-all, readonly]
+    default: confirm
+    label: "Safety level"
+    description: "confirm: saving, posting, deleting, raw OK-codes and scripts need approval. confirm-all: every non-read call needs approval. readonly: saving actions are blocked. open: no checks. A system profile can be stricter."
+  backend:
+    type: str
+    choices: [auto, windows, java]
+    default: auto
+    label: "SAP GUI backend"
+    description: "auto: SAP GUI for Windows (COM) on Windows, SAP GUI for Java elsewhere."
+  java_launcher:
+    type: str
+    default: ""
+    label: "SAP GUI for Java launcher"
+    description: "Command that starts SAP GUI for Java. Empty: found automatically in /Applications/SAP Clients or /opt/SAPClients."
+  java_args:
+    type: str
+    default: ""
+    label: "Extra SAP GUI for Java arguments"
+    description: "Appended before -f <bridge script>, e.g. trace options."
+  java_bridge_mode:
+    type: str
+    choices: [loop, thread, detach]
+    default: loop
+    label: "Java bridge mode"
+    description: "loop runs SAP calls on the script thread (default). thread and detach are fallbacks if SAP GUI for Java freezes while the bridge runs (detach also ends the startup script right away)."
+  cscript_path:
+    type: str
+    default: ""
+    label: "cscript.exe path"
+    description: "Windows only. Empty: %SystemRoot%\\System32\\cscript.exe."
+  saplogon_path:
+    type: str
+    default: ""
+    label: "saplogon.exe path"
+    description: "Windows only, used by sap_start. Empty: the standard SAP GUI install folders."
+  request_timeout:
+    type: int
+    default: 60
+    label: "Request timeout (seconds)"
+    description: "How long one SAP GUI call may take before the bridge is reset."
