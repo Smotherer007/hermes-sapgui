@@ -1191,7 +1191,7 @@ var SapBridge = (function () {
 
   OPS.key = function (args) {
     var s = findSession(args.session);
-    /* noWait: keys that open a modal dialog (ABAP Debugger, "save changes?") make SAP GUI
+    /* noWait: keys that open a modal dialog ("save changes?", system messages) make SAP GUI
        block until the dialog is answered, so the caller opts out of waiting and idle
        detection altogether and reads the screen afterwards. */
     var noWait = bool(args.noWait);

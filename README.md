@@ -172,7 +172,7 @@ Every failing call returns `{"error", "code", "hint"}`. The codes are stable:
 
 - The agent works with the SAP user's authorizations, in the user's SAP GUI. It is not an unattended RPA runtime.
 - SAP GUI for Java: only the SAP GUI started with `sap_start` is visible. The file queue adds a few milliseconds per call. Screenshots use Java's screen capture and on macOS need *Screen Recording* permission for SAP GUI.
-- SAP GUI for HTML / Fiori are not covered, and neither is the ABAP debugger.
+- SAP GUI for HTML and Fiori are not covered.
 - The SAP GUI for Java scripting engine is less documented than the Windows one. [TESTING.md](TESTING.md) is the checklist for verifying a new SAP GUI release.
 
 ## Development

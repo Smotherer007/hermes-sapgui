@@ -335,7 +335,7 @@
         },
         "noWait": {
           "type": "boolean",
-          "description": "Do not wait for SAP to become idle afterwards. Use for keys that open a modal dialog (ABAP Debugger, 'save changes?'), then read the screen with sap_screen. Default false."
+          "description": "Do not wait for SAP to become idle afterwards. Use for keys that open a modal dialog ('save changes?', a system message), then read the screen with sap_screen. Default false."
         },
         "session": {
           "$ref": "session"
