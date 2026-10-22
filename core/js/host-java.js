@@ -4,14 +4,25 @@
  *
  * The adapters start SAP GUI for Java with this bundle as the startup script:
  *     <SAPGUI launcher> -f <bundle>.js
- * The bundle is a config line + ops.js + this file. The script opens a
- * loopback-only TCP socket, accepts JSON-lines connections that start with
- * {"auth": "<token>"}, and executes every request on the script thread
- * (mode "loop", default) so SAP GUI sees the same thread it gave the script.
- * Fallbacks, for SAP GUI releases where a long-running script blocks the
- * user interface: mode "thread" executes requests on the connection threads
- * while the script thread idles; mode "detach" does the same but lets the
- * startup script end right away (the socket threads keep running).
+ * The bundle is a config line + ops.js + this file.
+ *
+ * Transport: a file queue. SAP GUI for Java runs startup scripts in its
+ * "SAPGUI:UserScript" sandbox, which grants FilePermission "<<ALL FILES>>"
+ * but no SocketPermission (a socket can listen, but accept() is denied).
+ * So the adapters drop one request per file into <queueDir>/in and the
+ * bridge answers into <queueDir>/out:
+ *     in/<name>.tmp  -> renamed to in/<name>.req   (written by the adapter)
+ *     out/<name>.tmp -> renamed to out/<name>.res  (written by the bridge)
+ * Each file holds one JSON line of the usual protocol. Requests run in name
+ * order. The queue lives in ~/.sapgui-bridge (mode 0700), so only the user
+ * can submit requests. A status file with a heartbeat (every 2 s) tells the
+ * adapters whether the bridge is alive.
+ *
+ * Mode "loop" (default) executes requests on the script thread, the thread
+ * SAP GUI gave the script. Fallbacks, for SAP GUI releases where a
+ * long-running script blocks the user interface: mode "thread" executes on a
+ * worker thread while the script thread idles; mode "detach" does the same
+ * but lets the startup script end right away.
  *
  * Works with Rhino (what SAP GUI for Java embeds) and Nashorn; GraalJS needs
  * its Nashorn compatibility mode.
@@ -34,17 +45,7 @@
   var System = J("java.lang.System");
   var Thread = J("java.lang.Thread");
   var Runnable = J("java.lang.Runnable");
-  var ServerSocket = J("java.net.ServerSocket");
-  var InetAddress = J("java.net.InetAddress");
-  var BufferedReader = J("java.io.BufferedReader");
-  var InputStreamReader = J("java.io.InputStreamReader");
-  var OutputStreamWriter = J("java.io.OutputStreamWriter");
-  var BufferedWriter = J("java.io.BufferedWriter");
-  var LinkedBlockingQueue = J("java.util.concurrent.LinkedBlockingQueue");
-  var ArrayBlockingQueue = J("java.util.concurrent.ArrayBlockingQueue");
-  var TimeUnit = J("java.util.concurrent.TimeUnit");
-  var ReentrantLock = J("java.util.concurrent.locks.ReentrantLock");
-  var HashMap = J("java.util.HashMap");
+  var JFile = J("java.io.File");
   var Files = J("java.nio.file.Files");
   var Paths = J("java.nio.file.Paths");
   var StandardCharsets = J("java.nio.charset.StandardCharsets");
@@ -105,75 +106,111 @@
 
   SapBridge.init(HOST);
 
-  var state = { running: true, server: null };
-  var queue = new LinkedBlockingQueue();
-  var execLock = new ReentrantLock();
+  var CopyOption = J("java.nio.file.StandardCopyOption");
   var mode = String(cfg.mode || "loop");
-  var token = String(cfg.token || "");
-  if (!token) {
-    try { token = String(System.getenv("SAPGUI_BRIDGE_TOKEN") || ""); } catch (e) { token = ""; }
+  var instance = String(cfg.instance || "");
+  var state = { running: true, lastRequest: 0, startedAt: HOST.now() };
+
+  if (!cfg.queueDir || !cfg.statusFile) { log("no queueDir/statusFile configured -- refusing to start"); return; }
+  var inDir = new JFile(String(cfg.queueDir), "in");
+  var outDir = new JFile(String(cfg.queueDir), "out");
+  inDir.mkdirs();
+  outDir.mkdirs();
+
+  function writeAtomic(path, text) {
+    // write next to it and rename, so a reader never sees a half-written file
+    var target = Paths.get(String(path));
+    var tmp = Paths.get(String(path).replace(/\.[a-z]+$/, "") + ".tmp");
+    Files.write(tmp, new JString(String(text)).getBytes(StandardCharsets.UTF_8));
+    try { Files.move(tmp, target, [CopyOption.REPLACE_EXISTING, CopyOption.ATOMIC_MOVE]); }
+    catch (eMove) { Files.move(tmp, target, [CopyOption.REPLACE_EXISTING]); }
   }
-  if (!token) { log("no token configured -- refusing to start"); return; }
+
+  function readText(file) {
+    return String(new JString(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8));
+  }
+
+  function listNames(dir, suffix) {
+    var raw = dir.list();
+    var out = [];
+    if (raw === null) { return out; }
+    for (var i = 0; i < raw.length; i++) {
+      var n = String(raw[i]);
+      if (n.length > suffix.length && n.substring(n.length - suffix.length) === suffix) { out.push(n); }
+    }
+    out.sort();
+    return out;
+  }
+
+  function clear(dir, suffix, olderThanMs) {
+    var names = listNames(dir, suffix);
+    for (var i = 0; i < names.length; i++) {
+      var f = new JFile(dir, names[i]);
+      if (!olderThanMs || HOST.now() - Number(f.lastModified()) > olderThanMs) {
+        try { f["delete"](); } catch (e) { /* ignore */ }
+      }
+    }
+  }
+
+  function writeStatus() {
+    if (!state.running) { return; }
+    try {
+      writeAtomic(cfg.statusFile, SapBridge.encode({ transport: "file", queueDir: String(cfg.queueDir), bridge: SapBridge.VERSION,
+        protocol: SapBridge.PROTOCOL, mode: mode, pid: pid(), engine: HOST.engine, instance: instance,
+        startedAt: state.startedAt, heartbeat: HOST.now() }));
+    } catch (e) { log("could not write the status file: " + e); }
+  }
 
   function execute(line) {
     var req = null;
     try { req = SapBridge.decode(line); } catch (e) { return SapBridge.handleLine(line); }
     if (req && req.op === "bridge.shutdown") {
       state.running = false;
-      try { state.server.close(); } catch (e2) { /* ignore */ }
+      try { new JFile(String(cfg.statusFile))["delete"](); } catch (e2) { /* ignore */ }
       return SapBridge.encode({ id: req.id, ok: true, result: { text: "bridge stopped" } });
     }
     if (req && req.op === "bridge.info") {
-      return SapBridge.encode({ id: req.id, ok: true, result: { mode: mode, engine: HOST.engine, pid: pid(),
+      return SapBridge.encode({ id: req.id, ok: true, result: { mode: mode, transport: "file", engine: HOST.engine, pid: pid(),
         java: String(System.getProperty("java.version")), os: String(System.getProperty("os.name")) } });
     }
     return SapBridge.handleLine(line);
   }
 
-  function writeLine(w, s) {
-    w.write(String(s));
-    w.write("\n");
-    w.flush();
+  /** Answer every waiting request; returns how many were handled. */
+  function pollOnce() {
+    var names = listNames(inDir, ".req");
+    for (var i = 0; i < names.length && state.running; i++) {
+      var f = new JFile(inDir, names[i]);
+      var line;
+      try {
+        line = readText(f);
+        f["delete"]();
+      } catch (e) {
+        log("could not read " + names[i] + ": " + e);
+        continue;
+      }
+      var out;
+      try { out = execute(line.replace(/[\r\n]+$/, "")); }
+      catch (e2) { out = SapBridge.encode({ id: null, ok: false, error: { code: "BRIDGE_ERROR", message: String(e2) } }); }
+      var base = names[i].substring(0, names[i].length - 4);
+      try { writeAtomic(new JFile(outDir, base + ".res").getPath(), out); }
+      catch (e3) { log("could not write the answer to " + base + ": " + e3); }
+      state.lastRequest = HOST.now();
+    }
+    return names.length;
   }
 
-  function serve(socket) {
-    try {
-      socket.setTcpNoDelay(true);
-      var reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-      var writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
-      var first = reader.readLine();
-      var auth = null;
-      try { auth = SapBridge.decode(String(first)); } catch (e) { auth = null; }
-      if (!auth || String(auth.auth) !== token) {
-        writeLine(writer, SapBridge.encode({ id: null, ok: false, error: { code: "AUTH_FAILED", message: "bad token" } }));
-        socket.close();
-        return;
+  function serveLoop() {
+    var lastClean = HOST.now();
+    while (state.running) {
+      var handled = 0;
+      try { handled = pollOnce(); } catch (e) { log("poll failed: " + e); }
+      if (!heartbeatThread && HOST.now() - lastBeat > 2000) { writeStatus(); lastBeat = HOST.now(); }
+      if (HOST.now() - lastClean > 60000) {
+        clear(outDir, ".res", 600000);   // answers nobody picked up
+        lastClean = HOST.now();
       }
-      writeLine(writer, SapBridge.encode({ id: null, ok: true, ready: true, bridge: SapBridge.VERSION, protocol: SapBridge.PROTOCOL, host: "java", mode: mode }));
-      while (state.running) {
-        var line = reader.readLine();
-        if (line === null) { break; }
-        line = String(line);
-        if (!line) { continue; }
-        var reply;
-        if (mode === "thread" || mode === "detach") {
-          execLock.lock();
-          try { reply = execute(line); } finally { execLock.unlock(); }
-        } else {
-          var item = new HashMap();
-          var box = new ArrayBlockingQueue(1);
-          item.put("line", line);
-          item.put("reply", box);
-          queue.put(item);
-          var r = box.poll(30, TimeUnit.MINUTES);
-          reply = r === null ? SapBridge.encode({ id: null, ok: false, error: { code: "TIMEOUT", message: "no answer from the script thread" } }) : String(r);
-        }
-        writeLine(writer, reply);
-      }
-    } catch (e3) {
-      log("connection ended: " + e3);
-    } finally {
-      try { socket.close(); } catch (e4) { /* ignore */ }
+      if (!handled) { Thread.sleep(HOST.now() - state.lastRequest < 3000 ? 15 : 100); }
     }
   }
 
@@ -184,63 +221,36 @@
     return t;
   }
 
-  var basePort = Number(cfg.port || 0);
-  var server = null;
-  var lastError = null;
-  for (var attempt = 0; attempt < 20 && server === null; attempt++) {
-    try {
-      server = new ServerSocket(basePort === 0 ? 0 : basePort + attempt, 16, InetAddress.getByName("127.0.0.1"));
-    } catch (e) { lastError = e; server = null; if (basePort === 0) { break; } }
-  }
-  if (server === null) { log("could not open a socket: " + lastError); return; }
-  state.server = server;
-  var port = server.getLocalPort();
+  // stale requests from an earlier SAP GUI must not run against this one
+  clear(inDir, ".req", 0);
+  clear(inDir, ".tmp", 0);
+  clear(outDir, ".res", 0);
 
-  if (cfg.statusFile) {
-    try {
-      var status = SapBridge.encode({ port: port, bridge: SapBridge.VERSION, protocol: SapBridge.PROTOCOL, mode: mode,
-        pid: pid(), engine: HOST.engine, startedAt: HOST.now() });
-      // write next to it and rename, so a reader never sees a half-written file
-      var target = Paths.get(String(cfg.statusFile));
-      var tmp = Paths.get(String(cfg.statusFile) + ".tmp");
-      Files.write(tmp, new JString(status).getBytes(StandardCharsets.UTF_8));
-      var CopyOption = J("java.nio.file.StandardCopyOption");
-      try { Files.move(tmp, target, [CopyOption.REPLACE_EXISTING, CopyOption.ATOMIC_MOVE]); }
-      catch (eMove) { Files.move(tmp, target, [CopyOption.REPLACE_EXISTING]); }
-    } catch (e5) { log("could not write the status file: " + e5); }
-  }
-  log("listening on 127.0.0.1:" + port + " (mode " + mode + ", " + HOST.engine + ")");
-
-  function spawnServe(sock) {
-    // own function so every connection thread captures its own socket
-    startThread(function () { serve(sock); }, "sapgui-bridge-conn");
-  }
-
-  startThread(function () {
-    while (state.running) {
-      try {
-        spawnServe(server.accept());
-      } catch (e) {
-        if (state.running) { log("accept failed: " + e); }
+  var lastBeat = 0;
+  var heartbeatThread = null;
+  writeStatus();
+  try {
+    heartbeatThread = startThread(function () {
+      while (state.running) {
+        writeStatus();
+        Thread.sleep(2000);
       }
-    }
-  }, "sapgui-bridge-accept");
-
-  if (mode === "detach") {
-    log("detached: the startup script ends, the bridge keeps serving");
-    return;
+    }, "sapgui-bridge-heartbeat");
+  } catch (e) {
+    heartbeatThread = null;
+    log("no heartbeat thread (" + e + "); the request loop writes the heartbeat");
   }
-  if (mode === "thread") {
+  log("ready: file queue " + cfg.queueDir + " (mode " + mode + ", " + HOST.engine + ")");
+
+  if (mode === "thread" || mode === "detach") {
+    startThread(serveLoop, "sapgui-bridge-worker");
+    if (mode === "detach") {
+      log("detached: the startup script ends, the bridge keeps serving");
+      return;
+    }
     while (state.running) { Thread.sleep(500); }
   } else {
-    while (state.running) {
-      var item = queue.poll(250, TimeUnit.MILLISECONDS);
-      if (item === null) { continue; }
-      var out;
-      try { out = execute(String(item.get("line"))); }
-      catch (e6) { out = SapBridge.encode({ id: null, ok: false, error: { code: "BRIDGE_ERROR", message: String(e6) } }); }
-      item.get("reply").put(new JString(String(out)));
-    }
+    serveLoop();
   }
   log("stopped");
 })(this);

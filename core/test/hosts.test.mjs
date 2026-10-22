@@ -9,7 +9,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import net from "node:net";
 import vm from "node:vm";
 import { spawn, execFileSync } from "node:child_process";
 import { CORE, OPS_SRC, createMockSap } from "./harness.mjs";
@@ -72,16 +71,28 @@ const haveRhino = (() => {
   try { execFileSync("java", ["-version"], { stdio: "ignore" }); return fs.existsSync(RHINO); } catch { return false; }
 })();
 
-describe("java host (Rhino, loopback socket)", { skip: !haveRhino && "java or rhino.jar missing" }, () => {
+describe("java host (Rhino, file queue)", { skip: !haveRhino && "java or rhino.jar missing" }, () => {
   const procs = [];
   after(() => { for (const p of procs) { try { p.kill(); } catch {} } });
 
-  async function startBridge(mode) {
+  // SAP GUI for Java runs startup scripts in its "SAPGUI:UserScript" sandbox:
+  // file access yes, sockets no (only the JDK default "localhost:0 listen").
+  const SANDBOX_POLICY = `grant {
+  permission java.io.FilePermission "<<ALL FILES>>", "read,write,delete,execute";
+  permission java.lang.RuntimePermission "*";
+  permission java.util.PropertyPermission "*", "read,write";
+  permission java.lang.reflect.ReflectPermission "suppressAccessChecks";
+  permission java.security.SecurityPermission "*";
+  permission java.net.SocketPermission "localhost:0", "listen";
+};
+`;
+
+  async function startBridge(mode, { sandbox = false } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sapgui-bridge-"));
     const statusFile = path.join(dir, "status.json");
-    const token = "tok-" + Math.random().toString(36).slice(2);
+    const queueDir = path.join(dir, "queue");
     const bundle = [
-      `var __SAPGUI_BRIDGE_CONFIG = ${JSON.stringify({ port: 0, token, statusFile, mode })};`,
+      `var __SAPGUI_BRIDGE_CONFIG = ${JSON.stringify({ queueDir, statusFile, mode, instance: "test" })};`,
       fs.readFileSync(path.join(CORE, "test", "mock-sap.cjs"), "utf8"),
       "var application = createMockSap({ savePopup: true });",
       // SAP GUI for Java keeps the JVM alive with its (non-daemon) UI threads; stand in for them
@@ -91,62 +102,63 @@ describe("java host (Rhino, loopback socket)", { skip: !haveRhino && "java or rh
     ].join("\n;\n");
     const file = path.join(dir, "bridge.js");
     fs.writeFileSync(file, bundle);
-    const p = spawn("java", ["-jar", RHINO, "-opt", "-1", file], { stdio: ["ignore", "ignore", "pipe"] });
+    const jvm = [];
+    if (sandbox) {
+      const policy = path.join(dir, "sandbox.policy");
+      fs.writeFileSync(policy, SANDBOX_POLICY);
+      jvm.push("-Djava.security.manager=allow", "-Djava.security.manager", `-Djava.security.policy==${policy}`);
+    }
+    const p = spawn("java", [...jvm, "-jar", RHINO, "-opt", "-1", file], { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     p.stderr.on("data", (d) => { stderr += d; });
     procs.push(p);
-    for (let i = 0; i < 200 && !fs.existsSync(statusFile); i++) await new Promise((r) => setTimeout(r, 50));
-    assert.ok(fs.existsSync(statusFile), "bridge did not start: " + stderr);
-    const status = JSON.parse(fs.readFileSync(statusFile, "utf8"));
-    return { port: status.port, token, status, proc: p, stderr: () => stderr };
+    let status = null;
+    for (let i = 0; i < 300 && !status; i++) {
+      try { status = JSON.parse(fs.readFileSync(statusFile, "utf8")); } catch { await new Promise((r) => setTimeout(r, 50)); }
+    }
+    assert.ok(status, "bridge did not start: " + stderr);
+    return { queueDir, statusFile, status, proc: p, stderr: () => stderr };
   }
 
-  function client(port) {
-    return new Promise((resolve, reject) => {
-      const sock = net.connect(port, "127.0.0.1");
-      let buf = "";
-      const waiters = [];
-      sock.on("data", (d) => {
-        buf += d;
-        let k;
-        while ((k = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, k);
-          buf = buf.slice(k + 1);
-          const w = waiters.shift();
-          if (w) { try { w(JSON.parse(line)); } catch (e) { throw new Error("bad line: " + JSON.stringify(line)); } }
+  // the same file protocol the adapters speak
+  function client(queueDir, tag) {
+    let seq = 0;
+    return {
+      async send(obj, timeoutMs = 20000) {
+        const name = `${String(Date.now()).padStart(15, "0")}-${tag}-${++seq}`;
+        const tmp = path.join(queueDir, "in", name + ".tmp");
+        fs.writeFileSync(tmp, JSON.stringify(obj) + "\n");
+        fs.renameSync(tmp, path.join(queueDir, "in", name + ".req"));
+        const res = path.join(queueDir, "out", name + ".res");
+        const end = Date.now() + timeoutMs;
+        while (Date.now() < end) {
+          if (fs.existsSync(res)) {
+            const text = fs.readFileSync(res, "utf8");
+            fs.unlinkSync(res);
+            return JSON.parse(text);
+          }
+          await new Promise((r) => setTimeout(r, 10));
         }
-      });
-      sock.on("error", reject);
-      sock.on("connect", () => resolve({
-        send(obj) { return new Promise((res) => { waiters.push(res); sock.write(JSON.stringify(obj) + "\n"); }); },
-        close() { sock.end(); },
-        closed: new Promise((res) => sock.on("close", res)),
-      }));
-    });
+        throw new Error("no answer to " + obj.op);
+      },
+    };
   }
 
   for (const mode of ["loop", "thread", "detach"]) {
-    test(`mode ${mode}: auth, requests, parallel clients, shutdown`, async () => {
+    test(`mode ${mode}: requests, parallel clients, heartbeat, shutdown`, async () => {
       const b = await startBridge(mode);
       assert.equal(b.status.mode, mode);
+      assert.equal(b.status.transport, "file");
       assert.match(b.status.engine, /Rhino/);
 
-      const bad = await client(b.port);
-      const denied = await bad.send({ auth: "wrong" });
-      assert.equal(denied.error.code, "AUTH_FAILED");
-      await bad.closed;
-
-      const c1 = await client(b.port);
-      const hi = await c1.send({ auth: b.token });
-      assert.equal(hi.ready, true);
-      assert.equal(hi.host, "java");
+      const c1 = client(b.queueDir, "a");
+      const c2 = client(b.queueDir, "b");
       const hello = await c1.send({ id: 1, op: "hello" });
       assert.equal(hello.result.host, "java");
       const info = await c1.send({ id: 2, op: "bridge.info" });
       assert.equal(info.result.mode, mode);
+      assert.equal(info.result.transport, "file");
 
-      const c2 = await client(b.port);
-      await c2.send({ auth: b.token });
       const [t, s] = await Promise.all([
         c1.send({ id: 3, op: "transaction", args: { tcode: "MM02" } }),
         c2.send({ id: 4, op: "sessions" }),
@@ -163,10 +175,16 @@ describe("java host (Rhino, loopback socket)", { skip: !haveRhino && "java or rh
       const err = await c1.send({ id: 8, op: "press", args: { id: "usr/btnNOPE" } });
       assert.equal(err.error.code, "NOT_FOUND");
 
+      const beat1 = JSON.parse(fs.readFileSync(b.statusFile, "utf8")).heartbeat;
+      await new Promise((r) => setTimeout(r, 2500));
+      const beat2 = JSON.parse(fs.readFileSync(b.statusFile, "utf8")).heartbeat;
+      assert.ok(beat2 > beat1, "heartbeat advances");
+      assert.deepEqual(fs.readdirSync(path.join(b.queueDir, "in")), [], "requests are consumed");
+
       const bye = await c2.send({ id: 9, op: "bridge.shutdown" });
       assert.equal(bye.ok, true);
+      assert.ok(!fs.existsSync(b.statusFile), "status file removed on shutdown");
       if (mode === "detach") {
-        // the startup script ended long ago; the threads were serving on their own
         assert.match(b.stderr(), /detached/);
         b.proc.kill();
       } else {
@@ -175,4 +193,40 @@ describe("java host (Rhino, loopback socket)", { skip: !haveRhino && "java or rh
       }
     });
   }
+
+  test("works inside a sandbox that forbids sockets, like SAP GUI for Java's", async () => {
+    const b = await startBridge("loop", { sandbox: true });
+    const c = client(b.queueDir, "s");
+    assert.equal((await c.send({ id: 1, op: "transaction", args: { tcode: "MM03" } })).ok, true);
+    const screen = await c.send({ id: 2, op: "screen" });
+    assert.match(screen.result.text, /ctxtRMMG1-MATNR/);
+    // proof that the sandbox is active: the bridge itself may not open a connection
+    const sock = await c.send({ id: 3, op: "script", args: { code: 'new java.net.Socket("127.0.0.1", 9); "connected"' } });
+    assert.equal(sock.ok, false);
+    assert.match(sock.error.message, /AccessControlException|access denied/);
+    await c.send({ id: 4, op: "bridge.shutdown" });
+    await new Promise((r) => b.proc.on("exit", r));
+  });
+
+  test("stale requests from an earlier run are discarded at start", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sapgui-stale-"));
+    fs.mkdirSync(path.join(dir, "in"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "in", "000000000000001-old-1.req"), JSON.stringify({ id: 1, op: "key", args: { key: "F11" } }) + "\n");
+    const statusFile = path.join(dir, "status.json");
+    const bundle = [
+      `var __SAPGUI_BRIDGE_CONFIG = ${JSON.stringify({ queueDir: dir, statusFile, mode: "loop" })};`,
+      fs.readFileSync(path.join(CORE, "test", "mock-sap.cjs"), "utf8"),
+      "var application = createMockSap({});",
+      OPS_SRC,
+      fs.readFileSync(path.join(CORE, "js", "host-java.js"), "utf8"),
+    ].join("\n;\n");
+    fs.writeFileSync(path.join(dir, "b.js"), bundle);
+    const p = spawn("java", ["-jar", RHINO, "-opt", "-1", path.join(dir, "b.js")], { stdio: "ignore" });
+    procs.push(p);
+    for (let i = 0; i < 300 && !fs.existsSync(statusFile); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(fs.readdirSync(path.join(dir, "in")), []);
+    assert.deepEqual(fs.readdirSync(path.join(dir, "out")), [], "the stale request was not answered");
+    const c = client(dir, "x");
+    await c.send({ id: 2, op: "bridge.shutdown" });
+  });
 });

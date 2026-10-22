@@ -123,8 +123,8 @@ class Manager:
         if running:
             note = ("\nNote: another SAP GUI for Java was already running without the bridge; the agent can only see "
                     "the window it started. Log on in the new window or with sap_login.")
-        return (f"Started SAP GUI for Java with the bridge (port {status.get('port')}, {status.get('engine', '')}, "
-                f"mode {status.get('mode')}). Log on in its logon window or call sap_login." + note)
+        return (f"Started SAP GUI for Java with the bridge ({status.get('engine', '')}, mode {status.get('mode')}, "
+                f"file queue). Log on in its logon window or call sap_login." + note)
 
     @staticmethod
     def _version(hello: Dict[str, Any]) -> str:
@@ -235,7 +235,8 @@ class Manager:
             if isinstance(b, JavaBridge):
                 try:
                     binfo = unwrap(b.request("bridge.info", {}, 10))
-                    info(f"bridge mode {binfo.get('mode')}, Java {binfo.get('java')}, {binfo.get('os')}, pid {binfo.get('pid')}")
+                    info(f"bridge mode {binfo.get('mode')}, transport {binfo.get('transport')}, Java {binfo.get('java')}, "
+                         f"{binfo.get('os')}, pid {binfo.get('pid')}")
                 except SapError:
                     pass
             if hello.get("sapguiError"):

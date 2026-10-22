@@ -4,9 +4,10 @@
   ``host-windows.js``; JSON lines over stdin/stdout. Stateless, so a hung COM
   call is handled by killing and restarting the process.
 * ``JavaBridge`` -- SAP GUI for Java started with ``ops.js`` + ``host-java.js``
-  as its startup script; JSON lines over a loopback socket, authenticated with
-  a per-launch token. The JVM outlives the agent; any later agent process
-  (pi or Hermes) reconnects through the state files in ``~/.sapgui-bridge``.
+  as its startup script; one file per request and answer in
+  ``~/.sapgui-bridge/java-queue`` (SAP GUI for Java's script sandbox allows
+  files but no sockets). The JVM outlives the agent; any later agent process
+  (pi or Hermes) keeps using the same queue.
 
 Every request is serialised with a lock: SAP GUI is one user interface.
 """
@@ -18,7 +19,6 @@ import json
 import os
 import queue
 import secrets as pysecrets
-import socket
 import subprocess
 import threading
 import time
@@ -193,13 +193,48 @@ class WindowsBridge:
                 pass
 
 
+#: A heartbeat older than this means the bridge may be gone (then the pid decides).
+HEARTBEAT_STALE_SECONDS = 10.0
+
+
+def _pid_alive(pid: Any) -> Optional[bool]:
+    try:
+        n = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if launcher.IS_WINDOWS:
+        try:
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {n}", "/NH"], capture_output=True, timeout=10).stdout
+            return str(n).encode() in out
+        except (OSError, subprocess.SubprocessError):
+            return None
+    try:
+        os.kill(n, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+
+
 class JavaBridge:
+    """File-queue transport to the bridge inside SAP GUI for Java.
+
+    SAP GUI for Java runs startup scripts in its "SAPGUI:UserScript" sandbox:
+    file access is allowed, sockets are not. So every request is one file in
+    ``<state>/java-queue/in`` and every answer one file in ``.../out``; the
+    bridge reports liveness with a heartbeat in ``java-status.json``.
+    """
+
     kind = "java"
 
     def __init__(self, state_dir: Optional[Path] = None) -> None:
         self.state_dir = state_dir or bridge_home()
-        self.sock: Optional[socket.socket] = None
-        self.file = None
+        self.client = f"{os.getpid()}-{pysecrets.token_hex(3)}"
         self.next_id = 0
         self.lock = threading.RLock()
         self.ready: Dict[str, Any] = {}
@@ -213,6 +248,10 @@ class JavaBridge:
         return self.state_dir / "java-status.json"
 
     @property
+    def queue_dir(self) -> Path:
+        return self.state_dir / "java-queue"
+
+    @property
     def log_file(self) -> Path:
         return self.state_dir / "javagui.log"
 
@@ -222,99 +261,106 @@ class JavaBridge:
                 return json.loads(path.read_text(encoding="utf-8"))
             except FileNotFoundError:
                 return None
-            except ValueError:
+            except (ValueError, OSError):
                 time.sleep(0.05)  # being replaced right now
         return None
 
-    def _connect(self, timeout: float = 5.0) -> None:
-        launch = self._read_json(self.launch_file)
+    def _live_status(self) -> Dict[str, Any]:
         status = self._read_json(self.status_file)
-        if not launch or not status or not status.get("port"):
+        if not status or status.get("transport") != "file":
             raise SapError("NOT_RUNNING", "SAP GUI for Java is not running with the bridge.",
                            "Start it with sap_start (SAP GUI for Java must be started by the agent, not by hand).")
-        try:
-            sock = socket.create_connection(("127.0.0.1", int(status["port"])), timeout=timeout)
-        except OSError:
-            raise SapError("NOT_RUNNING", "SAP GUI for Java with the bridge is not running (any more).",
-                           "Start it with sap_start.") from None
-        sock.settimeout(timeout)
-        f = sock.makefile("rb")  # buffered reads; writes go through sendall
-        try:
-            sock.sendall((_ascii_json({"auth": launch.get("token", "")}) + "\n").encode("ascii"))
-            hello = json.loads(f.readline().decode("ascii", "replace") or "{}")
-        except (OSError, ValueError):
-            sock.close()
-            raise SapError("NOT_RUNNING", "The bridge port is open but does not answer.", "Restart with sap_start.") from None
-        if not hello.get("ok"):
-            sock.close()
-            raise SapError("AUTH_FAILED", "The bridge rejected the token (started by another installation?).",
-                           "Quit SAP GUI for Java and start it again with sap_start.")
-        if hello.get("protocol") != PROTOCOL:
-            sock.close()
-            raise SapError("BRIDGE_VERSION", f"Bridge protocol {hello.get('protocol')} does not match {PROTOCOL}.",
+        if status.get("protocol") != PROTOCOL:
+            raise SapError("BRIDGE_VERSION", f"Bridge protocol {status.get('protocol')} does not match {PROTOCOL}.",
                            "Quit SAP GUI for Java and start it again with sap_start (it then loads the new bridge).")
-        self.sock, self.file, self.ready = sock, f, hello
+        age = time.time() - float(status.get("heartbeat") or 0) / 1000.0
+        if age > HEARTBEAT_STALE_SECONDS and _pid_alive(status.get("pid")) is not True:
+            raise SapError("NOT_RUNNING", f"SAP GUI for Java with the bridge stopped (last sign of life {int(age)} s ago).",
+                           "Start it again with sap_start.")
+        self.ready = status
+        return status
 
     def reachable(self) -> bool:
-        with self.lock:
-            if self.sock is not None:
-                return True
-            try:
-                self._connect(timeout=2.0)
-                return True
-            except SapError:
-                return False
+        try:
+            self._live_status()
+            return True
+        except SapError:
+            return False
 
     def request(self, op: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         with self.lock:
-            for attempt in (1, 2):
-                if self.sock is None:
-                    self._connect()
-                self.next_id += 1
-                rid = self.next_id
-                try:
-                    assert self.sock and self.file
-                    self.sock.settimeout(timeout)
-                    self.sock.sendall((_ascii_json({"id": rid, "op": op, "args": args}) + "\n").encode("ascii"))
-                    while True:
-                        raw = self.file.readline()
-                        if not raw:
-                            raise ConnectionError("closed")
-                        msg = json.loads(raw.decode("ascii", "replace"))
-                        if msg.get("id") == rid:
-                            return msg
-                except socket.timeout:
-                    self.close()
+            self._live_status()
+            self.next_id += 1
+            rid = self.next_id
+            name = f"{time.time_ns() // 1_000_000:015d}-{self.client}-{rid:06d}"
+            inbox, outbox = self.queue_dir / "in", self.queue_dir / "out"
+            ensure_private_dir(inbox)
+            ensure_private_dir(outbox)
+            tmp, req, res = inbox / f"{name}.tmp", inbox / f"{name}.req", outbox / f"{name}.res"
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii", newline="\n") as fh:
+                fh.write(_ascii_json({"id": rid, "op": op, "args": args}) + "\n")
+            os.replace(tmp, req)
+            deadline = time.monotonic() + timeout
+            next_check = time.monotonic() + 1.0
+            pause = 0.005
+            while True:
+                if res.exists():
+                    text = res.read_text(encoding="ascii", errors="replace")
+                    try:
+                        res.unlink()
+                    except OSError:
+                        pass
+                    try:
+                        msg = json.loads(text)
+                    except ValueError:
+                        raise SapError("BRIDGE_ERROR", "The bridge wrote an unreadable answer.") from None
+                    return msg
+                now = time.monotonic()
+                if now >= deadline:
+                    self._withdraw(req)
                     raise SapError("TIMEOUT", f"SAP GUI for Java did not answer within {int(timeout)} seconds ({op}).",
                                    "SAP may be waiting for a dialog or a long-running report. Look at the SAP window, "
-                                   "then read the screen with sap_screen.") from None
-                except (OSError, ConnectionError, ValueError):
-                    self.close()
-                    if attempt == 2:
-                        raise SapError("NOT_RUNNING", "Lost the connection to SAP GUI for Java.", "Start it again with sap_start.") from None
-            raise SapError("NOT_RUNNING", "Lost the connection to SAP GUI for Java.")
+                                   "then read the screen with sap_screen.")
+                if now >= next_check:
+                    next_check = now + 1.0
+                    try:
+                        self._live_status()
+                    except SapError:
+                        self._withdraw(req)
+                        raise
+                time.sleep(pause)
+                pause = min(pause * 1.5, 0.05)
+
+    @staticmethod
+    def _withdraw(req: Path) -> None:
+        try:
+            req.unlink()  # not picked up yet: it must not run later
+        except OSError:
+            pass
 
     def launch(self, command: List[str], mode: str, wait: float) -> Dict[str, Any]:
         """Start SAP GUI for Java with the bridge; returns the status the bridge wrote."""
         with self.lock:
-            self.close()
             ensure_private_dir(self.state_dir)
-            token = pysecrets.token_urlsafe(32)
             for path in (self.status_file, self.launch_file):
                 try:
                     path.unlink()
                 except FileNotFoundError:
                     pass
-            bundle = build_bundle("java", self.state_dir, {"port": 0, "token": token, "statusFile": str(self.status_file), "mode": mode})
+            ensure_private_dir(self.queue_dir)
+            instance = pysecrets.token_hex(8)
+            bundle = build_bundle("java", self.state_dir, {"queueDir": str(self.queue_dir), "statusFile": str(self.status_file),
+                                                           "mode": mode, "instance": instance})
             fd = os.open(str(self.launch_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"token": token, "command": command, "startedAt": time.time(), "mode": mode}, fh)
+                json.dump({"instance": instance, "command": command, "startedAt": time.time(), "mode": mode}, fh)
             proc = launcher.spawn_detached(command + ["-f", str(bundle)], self.log_file)
             deadline = time.monotonic() + wait
             while time.monotonic() < deadline:
                 status = self._read_json(self.status_file)
-                if status and status.get("port"):
-                    self._connect()
+                if status and status.get("instance") == instance:
+                    self.ready = status
                     return status
                 if proc.poll() is not None:
                     raise SapError("LAUNCH_FAILED", f"SAP GUI for Java exited right away (code {proc.returncode}).",
@@ -328,12 +374,7 @@ class JavaBridge:
             )
 
     def close(self) -> None:
-        sock, self.sock, self.file = self.sock, None, None
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+        """Nothing to close: every request is its own pair of files."""
 
 
 def unwrap(msg: Dict[str, Any]) -> Dict[str, Any]:

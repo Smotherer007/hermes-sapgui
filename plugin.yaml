@@ -57,8 +57,8 @@ config_schema:
   java_args:
     type: str
     default: ""
-    label: "Extra SAP GUI for Java arguments"
-    description: "Appended before -f <bridge script>, e.g. trace options."
+    label: "Extra SAP GUI for Java options"
+    description: "SAP GUI for Java command-line options, appended before -f <bridge script> (e.g. -t <trace keys>). They go to SAP GUI's own option parser, not to the JVM."
   java_bridge_mode:
     type: str
     choices: [loop, thread, detach]

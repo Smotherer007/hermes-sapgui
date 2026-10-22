@@ -20,8 +20,9 @@ material / customer / table you know.
 
 | # | Step | Expected | If it fails, report |
 |---|---|---|---|
-| A1 | `sap_start` | "Started SAP GUI for Java with the bridge (port …, Rhino …, mode loop)"; the SAP GUI logon window opens | the message, and the last 30 lines of `~/.sapgui-bridge/javagui.log` |
+| A1 | `sap_start` | "Started SAP GUI for Java with the bridge (Rhino …, mode loop, file queue)"; the SAP GUI logon window opens | the message, and the last 30 lines of `~/.sapgui-bridge/javagui.log` |
 | A2 | Use the logon window while the bridge runs (scroll the list, open an entry) | SAP GUI reacts normally | whether the window is frozen; then retry A1 with bridge mode `thread`, then `detach` |
+| A2b | `sap_doctor` | `OK    bridge 0.1.0 answers (Rhino …)` and `transport file` | the full output and the end of `javagui.log` (look for `AccessControlException`) |
 | A3 | Log on by hand, then `sap_status` | the connection and session with SID/client/user | the full `sap_status` text |
 | A4 | Quit SAP GUI, `sap_start`, then `sap_login system=<profile>` | "Logged on: submitted the logon screen …"; bound to `/app/con[0]/ses[0]` | the error code/message |
 | A5 | `sap_transaction tcode=MM03`, then `sap_screen` | header `<SID>/<client> … MM03 · SAPLMGMM 0060`; `[input] wnd[0]/usr/ctxtRMMG1-MATNR  Material = ""` | the full `sap_screen` text (labels missing? types wrong?) |

@@ -10,7 +10,7 @@ Run `sap_doctor` first. It checks each link in order and prints `FAIL` with a fi
 ## How the pieces fit
 
 - **SAP GUI for Windows**: the plugin runs a small script with `cscript.exe` that attaches to SAP Logon through COM (`GetObject("SAPGUI")`). SAP Logon must be running.
-- **SAP GUI for Java (macOS, Linux)**: the bridge runs *inside* SAP GUI for Java as its startup script. That only works for a SAP GUI that `sap_start` started. A SAP GUI opened from the Dock or menu is invisible to the agent.
+- **SAP GUI for Java (macOS, Linux)**: the bridge runs *inside* SAP GUI for Java as its startup script and exchanges requests as files in `~/.sapgui-bridge/java-queue` (the script sandbox forbids sockets). That only works for a SAP GUI that `sap_start` started. A SAP GUI opened from the Dock or menu is invisible to the agent.
 - In both cases scripting must be allowed on the client **and** on the SAP server.
 
 ## SAPGUI_UNAVAILABLE (Windows)
@@ -27,8 +27,8 @@ Run `sap_doctor` first. It checks each link in order and prints `FAIL` with a fi
    - Any platform: `java -cp <install>/jar/GuiStartS.jar com.sap.platin.Gui`.
 2. Scripting in SAP GUI for Java: Preferences → Accessibility & Scripting → Scripting → enable scripting (and allow scripts to run without asking, if offered).
 3. `LAUNCH_TIMEOUT`: SAP GUI started but the bridge did not report. `sap_doctor` shows the end of `~/.sapgui-bridge/javagui.log`. Look for:
-   - `[sapgui-bridge] listening on 127.0.0.1:<port>` – the bridge runs; the problem is elsewhere (firewall on loopback is very unusual).
-   - an exception mentioning `SecurityException`, `AccessControlException` or `ServerSocket` – SAP GUI for Java blocked the script from opening its local socket. Report the exact message to the user.
+   - `[sapgui-bridge] ready: file queue …` – the bridge runs. If calls still fail, check that `~/.sapgui-bridge/java-queue/in` empties (the bridge picks up requests) and look for later lines in the log.
+   - an exception mentioning `AccessControlException` – SAP GUI for Java's script sandbox (`SAPGUI:UserScript`) refused something. It allows file access, environment variables and screen capture, but no sockets and no custom JVM options; grants in `SAPGUI.policy` or `-Djava.security.policy` do not change the script's permissions. Report the exact message to the user.
    - a scripting-disabled message – enable scripting (step 2).
 4. If SAP GUI for Java freezes while the bridge runs, set the bridge mode (Hermes setting `java_bridge_mode`, pi `javaBridgeMode` / `SAPGUI_JAVA_BRIDGE_MODE`) to `thread`, quit SAP GUI for Java and run `sap_start` again. If it still freezes, try `detach`.
 5. If the user had SAP GUI for Java open already, the new window from `sap_start` is the one the agent sees. Ask the user to log on there (or use `sap_login`).

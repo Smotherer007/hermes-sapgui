@@ -14,11 +14,11 @@ Both SAP GUIs ship the same *SAP GUI Scripting API* (`findById`, `wnd[0]/usr/...
 Hermes ──JSON lines──▶ bridge ──SAP GUI Scripting API──▶ SAP GUI ──▶ SAP system
                          │
    Windows:  cscript.exe + host-windows.js  ── COM: GetObject("SAPGUI")   (stdin/stdout)
-   macOS/Linux: SAP GUI for Java runs host-java.js as its startup script   (127.0.0.1 socket + token)
+   macOS/Linux: SAP GUI for Java runs host-java.js as its startup script   (file queue in ~/.sapgui-bridge)
 ```
 
 - **SAP GUI for Windows**: `cscript.exe` (part of every Windows) attaches to SAP Logon through COM. No pywin32, no native modules. The bridge process holds no state, so a hung call is fixed by restarting it.
-- **SAP GUI for Java**: SAP GUI for Java has its own JavaScript engine and can run a script at start-up (`-f <script>`). `sap_start` launches SAP GUI for Java with the bridge as that script. The bridge opens a socket on 127.0.0.1 only and accepts only clients that know the per-launch token stored in `~/.sapgui-bridge/` (mode 0600). SAP GUI keeps running when Hermes restarts; Hermes (or pi) reconnects.
+- **SAP GUI for Java**: SAP GUI for Java has its own JavaScript engine and can run a script at start-up (`-f <script>`). `sap_start` launches SAP GUI for Java with the bridge as that script. SAP GUI for Java runs such scripts in its `SAPGUI:UserScript` sandbox, which allows file access but no network sockets, so requests and answers are exchanged as files in `~/.sapgui-bridge/java-queue` (directory mode 0700: only your user can submit requests). The bridge writes a heartbeat every 2 seconds. SAP GUI keeps running when Hermes restarts; Hermes (or pi) simply keeps using the queue.
 
 Other SAP GUI MCP servers ([Hochfrequenz/sapgui.mcp](https://github.com/Hochfrequenz/sapgui.mcp), [kts982/mcp-sap-gui](https://github.com/kts982/mcp-sap-gui), ...) support SAP GUI for Windows only, plus the Web GUI in a browser. Driving SAP GUI for Java's own scripting engine is what this plugin adds.
 
@@ -115,7 +115,7 @@ Passwords are **never** stored in clear text; `sap_setup_system` refuses them. T
 | `safety_level` | `SAPGUI_SAFETY_LEVEL` | `confirm` | see below |
 | `backend` | `SAPGUI_BACKEND` | `auto` | `windows` (COM), `java`, or `auto` (Windows → COM, else Java) |
 | `java_launcher` | `SAPGUI_JAVA_LAUNCHER` | auto | command that starts SAP GUI for Java; found automatically under `/Applications/SAP Clients/…` and `/opt/SAPClients/…` |
-| `java_args` | `SAPGUI_JAVA_ARGS` | | extra SAP GUI for Java arguments |
+| `java_args` | `SAPGUI_JAVA_ARGS` | | extra SAP GUI for Java command-line options (e.g. `-t <trace keys>`). These go to SAP GUI's own option parser, not to the JVM, so `-D…` is rejected |
 | `java_bridge_mode` | `SAPGUI_JAVA_BRIDGE_MODE` | `loop` | `loop`, or the fallbacks `thread` / `detach` if SAP GUI for Java freezes while the bridge runs |
 | `cscript_path` | `SAPGUI_CSCRIPT` | `%SystemRoot%\System32\cscript.exe` | Windows |
 | `saplogon_path` | `SAPGUI_SAPLOGON` | standard install path | Windows, for `sap_start` |
@@ -171,7 +171,7 @@ Every failing call returns `{"error", "code", "hint"}`. The codes are stable:
 ## Limits
 
 - The agent works with the SAP user's authorizations, in the user's SAP GUI. It is not an unattended RPA runtime.
-- SAP GUI for Java: only the SAP GUI started with `sap_start` is visible. Screenshots use Java's screen capture and on macOS need *Screen Recording* permission for SAP GUI.
+- SAP GUI for Java: only the SAP GUI started with `sap_start` is visible. The file queue adds a few milliseconds per call. Screenshots use Java's screen capture and on macOS need *Screen Recording* permission for SAP GUI.
 - SAP GUI for HTML / Fiori are not covered, and neither is the ABAP debugger.
 - The SAP GUI for Java scripting engine is less documented than the Windows one. [TESTING.md](TESTING.md) is the checklist for verifying a new SAP GUI release.
 
@@ -183,7 +183,7 @@ python -m pytest tests                                    # the plugin (needs no
 npm i --no-save acorn && node --test core/test/*.test.mjs  # the shared bridge
 ```
 
-The tests run the real bridge against a mock of the SAP GUI object model. For the Windows backend, `cscript.exe` is replaced by an imitation of Windows Script Host. For the Java backend, SAP GUI for Java is replaced by Rhino, its embedded JavaScript engine, reached over the real socket protocol. `RHINO_JAR` points to a Rhino 1.7.x jar ([releases](https://github.com/mozilla/rhino/releases)).
+The tests run the real bridge against a mock of the SAP GUI object model. For the Windows backend, `cscript.exe` is replaced by an imitation of Windows Script Host. For the Java backend, SAP GUI for Java is replaced by Rhino, its embedded JavaScript engine, reached over the real file-queue protocol, once with a Java SecurityManager that forbids sockets the way SAP GUI for Java's script sandbox does. `RHINO_JAR` points to a Rhino 1.7.x jar ([releases](https://github.com/mozilla/rhino/releases)).
 
 `core/` is shared with pi-sapgui. After changing it, run `python3 scripts/sync-core.py ../pi-sapgui` and commit both repositories. The test suites check `core/CHECKSUMS`.
 
